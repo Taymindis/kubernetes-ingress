@@ -4,6 +4,83 @@ ARG NGINX_PLUS_VERSION=r26
 ARG DOWNLOAD_TAG=edge
 ARG DEBIAN_VERSION=bullseye-slim
 
+############################################# Base WAF image for ALPINE #############################################
+FROM docker.io/library/nginx:1.21.6-alpine AS basewaf-alpine
+
+ARG GEO_DB_RELEASE=2022-03
+ARG MODSEC_TAG=v3.0.6
+ARG OWASP_TAG=v3.3.2
+
+WORKDIR /opt
+
+# Install dependencies; includes dependencies required for compile-time options:
+# curl, libxml, pcre, and lmdb and Modsec
+RUN echo "Installing Dependencies" && \
+    apk add --no-cache --virtual general-dependencies \
+		libcrypto1.1 libssl1.1 libxml2 libxslt \
+    autoconf \
+    automake \
+    byacc \
+    curl-dev \
+    flex \
+    g++ \
+    gcc \
+    geoip-dev \
+    git \
+    libc-dev \
+    libmaxminddb-dev \
+    libstdc++ \
+    libtool \
+    libxml2-dev \
+    linux-headers \
+    lmdb-dev \
+    make \
+    openssl-dev \
+    pcre-dev \
+    yajl-dev \
+    zlib-dev
+
+# Clone and compile modsecurity. Binary will be located in /usr/local/modsecurity
+RUN echo "Installing ModSec Library" && \
+    git clone -b ${MODSEC_TAG} --depth 1 https://github.com/SpiderLabs/ModSecurity.git && \
+    git -C /opt/ModSecurity submodule update --init --recursive && \
+    (cd "/opt/ModSecurity" && \
+        ./build.sh && \
+        ./configure --with-lmdb && \
+        make && \
+        make install \
+    ) && \
+    rm -fr /opt/ModSecurity \
+        /usr/local/modsecurity/lib/libmodsecurity.a \
+        /usr/local/modsecurity/lib/libmodsecurity.la
+
+# Clone Modsec Nginx Connector, GeoIP, ModSec OWASP Rules, and download/extract nginx and GeoIP databases
+RUN echo 'Cloning Modsec Nginx Connector, GeoIP, ModSec OWASP Rules, and download/extract nginx and GeoIP databases' && \
+    git clone -b master --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git && \
+    git clone -b master --depth 1 https://github.com/leev/ngx_http_geoip2_module.git && \
+    git clone -b ${OWASP_TAG} --depth 1 https://github.com/coreruleset/coreruleset.git /usr/local/owasp-modsecurity-crs && \
+		mv /usr/local/owasp-modsecurity-crs/crs-setup.conf.example /usr/local/owasp-modsecurity-crs/crs-setup.conf && \
+    wget -O - https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz | tar -xz && \
+    mkdir -p /etc/nginx/geoip && \
+    wget -O - https://download.db-ip.com/free/dbip-city-lite-${GEO_DB_RELEASE}.mmdb.gz | gzip -d > /etc/nginx/geoip/dbip-city-lite.mmdb && \
+    wget -O - https://download.db-ip.com/free/dbip-country-lite-${GEO_DB_RELEASE}.mmdb.gz | gzip -d > /etc/nginx/geoip/dbip-country-lite.mmdb
+
+# Install GeoIP2 and ModSecurity Nginx modules
+RUN echo 'Installing Nginx Modules' && \
+    (cd "/opt/nginx-$NGINX_VERSION" && \
+        ./configure --with-compat \
+            --add-dynamic-module=../ModSecurity-nginx \
+            --add-dynamic-module=../ngx_http_geoip2_module && \
+        make modules \
+    ) && \
+    cp /opt/nginx-$NGINX_VERSION/objs/ngx_http_modsecurity_module.so \
+        /opt/nginx-$NGINX_VERSION/objs/ngx_http_geoip2_module.so \
+        /usr/lib/nginx/modules/ && \
+    rm -fr /opt/* && \
+    apk del general-dependencies
+
+
+
 ############################################# Base image for Debian #############################################
 FROM nginx:1.21.6 AS debian
 
@@ -12,6 +89,7 @@ RUN apt-get update \
 	# temporary fix for CVE-2022-22822
 	&& apt-get install -y libexpat1 \
 	# temporary fix for CVE-2022-0778 and CVE-2021-4160
+	&& apt-get install -y apt-utils autoconf automake build-essential git libcurl4-openssl-dev libgeoip-dev liblmdb-dev libpcre++-dev libtool libxml2-dev libyajl-dev pkgconf wget zlib1g-dev \
 	&& apt-get install -y libssl1.1 openssl \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& echo $NGINX_VERSION > nginx_version
@@ -21,9 +99,27 @@ RUN apt-get update \
 # docker.io/library/nginx is a temporary workaround for Dependabot to see this as different from the one used in Debian
 FROM docker.io/library/nginx:1.21.6-alpine AS alpine
 
+#### COPY WAF MODULE
+COPY --from=basewaf-alpine /usr/local/modsecurity /usr/local/modsecurity
+COPY --from=basewaf-alpine /usr/local/owasp-modsecurity-crs /etc/nginx/owasp-modsecurity-crs/
+COPY --from=basewaf-alpine /usr/lib/nginx/modules/ /usr/lib/nginx/modules/
+
+COPY build/modsecurity/nginx-modsecurity.conf /etc/nginx/owasp-modsecurity-crs/
+
+####
+
+
 RUN apk add --no-cache libcap \
 	# Temp fix for CVE-2022-0778 and CVE-2022-23308
-	&& apk upgrade --no-cache libcrypto1.1 libssl1.1 libxml2 libxslt
+	&& apk upgrade --no-cache libcrypto1.1 libssl1.1 libxml2 libxslt \
+ 		curl-dev \
+    libmaxminddb-dev \
+    libstdc++ \
+    libxml2-dev \
+    lmdb-dev \
+    pcre \
+    tzdata \
+    yajl
 
 
 ############################################# Base image for Alpine with NGINX Plus #############################################
@@ -239,6 +335,17 @@ RUN --mount=target=/tmp [ -n "${NAP_MODULES##*waf*}" ] && exit 0; mkdir -p /etc/
 	; done \
 	&& cp -a /tmp/build/log-default.json /etc/nginx
 
+### TODO Run only 
+RUN apk add --no-cache \
+    curl-dev \
+    libmaxminddb-dev \
+    libstdc++ \
+    libxml2-dev \
+    lmdb-dev \
+    pcre \
+    tzdata \
+    yajl
+
 # run only on nap dos build
 RUN --mount=target=/tmp [ -n "${NAP_MODULES##*dos*}" ] && exit 0; mkdir -p /root/app_protect_dos /etc/nginx/dos/policies /etc/nginx/dos/logconfs /shared/cores /var/log/adm /var/run/adm \
 	&& chmod 777 /shared/cores /var/log/adm /var/run/adm /etc/app_protect_dos
@@ -250,6 +357,8 @@ RUN --mount=target=/tmp mkdir -p /var/lib/nginx /etc/nginx/secrets /etc/nginx/st
 	/tmp/internal/configs/version2/nginx$PLUS.virtualserver.tmpl /tmp/internal/configs/version2/nginx$PLUS.transportserver.tmpl / \
 	&& chown -R nginx:0 /etc/nginx /etc/nginx/secrets /var/cache/nginx /var/lib/nginx /*.tmpl \
 	&& rm -f /etc/nginx/conf.d/* /etc/apt/apt.conf.d/90pkgs-nginx /etc/apt/sources.list.d/nginx-plus.list
+
+
 
 # Uncomment the line below if you would like to add the default.pem to the image
 # and use it as a certificate and key for the default server
@@ -326,3 +435,7 @@ FROM common as download
 LABEL org.nginx.kic.image.build.version="binaries"
 
 COPY --from=kic /nginx-ingress /
+
+# make alpine-image PREFIX=minikawoon/nginxwaf-ingress TARGET=download
+
+# make push PREFIX=minikawoon/nginxwaf-ingress TAG=<YOUR_TAG_VERSION>
