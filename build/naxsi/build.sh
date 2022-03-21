@@ -18,7 +18,7 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-export NGINX_VERSION=1.19.9
+export NGINX_VERSION=1.21.6
 
 export BUILD_PATH=/tmp/build
 
