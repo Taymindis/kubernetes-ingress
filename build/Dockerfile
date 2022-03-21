@@ -104,7 +104,7 @@ COPY --from=basewaf-alpine /usr/local/modsecurity /usr/local/modsecurity
 COPY --from=basewaf-alpine /usr/local/owasp-modsecurity-crs /etc/nginx/owasp-modsecurity-crs/
 COPY --from=basewaf-alpine /usr/lib/nginx/modules/ /usr/lib/nginx/modules/
 
-COPY build/modsecurity/nginx-modsecurity.conf /etc/nginx/owasp-modsecurity-crs/
+COPY build/modsecurity /etc/nginx/modsec_conf
 
 ####
 
