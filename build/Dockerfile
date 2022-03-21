@@ -4,6 +4,9 @@ ARG NGINX_PLUS_VERSION=r26
 ARG DOWNLOAD_TAG=edge
 ARG DEBIAN_VERSION=bullseye-slim
 
+
+## docker build --build-arg IC_VERSION=v2.1.1-SNAPSHOT-3c56092 --build-arg GIT_COMMIT=3c560926311d6c8be1933584f560fedfe502669c --build-arg DATE=2022-03-21T07:03:52Z --build-arg DOWNLOAD_TAG=2.1.1 --target download -f build/Dockerfile -t minikawoon/nginx-naxsi-ingress:2.1.1.3 . --build-arg BUILD_OS=alpine
+## make push PREFIX=minikawoon/nginxwaf-ingress TAG=2.1.1
 ############################################# Base WAF image for ALPINE #############################################
 FROM docker.io/library/nginx:1.21.6-alpine AS basewaf-alpine
 
