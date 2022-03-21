@@ -1,9 +1,85 @@
 # syntax=docker/dockerfile:1.3
 ARG BUILD_OS=debian
 ARG NGINX_PLUS_VERSION=r26
-ARG UBI_VERSION=8
 ARG DOWNLOAD_TAG=edge
 ARG DEBIAN_VERSION=bullseye-slim
+
+############################################# Base WAF image for ALPINE #############################################
+FROM docker.io/library/nginx:1.21.6-alpine AS basewaf-alpine
+
+ARG GEO_DB_RELEASE=2022-03
+ARG MODSEC_TAG=v3.0.6
+ARG OWASP_TAG=v3.3.2
+
+WORKDIR /opt
+
+# Install dependencies; includes dependencies required for compile-time options:
+# curl, libxml, pcre, and lmdb and Modsec
+RUN echo "Installing Dependencies" && \
+    apk add --no-cache --virtual general-dependencies \
+		libcrypto1.1 libssl1.1 libxml2 libxslt \
+    autoconf \
+    automake \
+    byacc \
+    curl-dev \
+    flex \
+    g++ \
+    gcc \
+    geoip-dev \
+    git \
+    libc-dev \
+    libmaxminddb-dev \
+    libstdc++ \
+    libtool \
+    libxml2-dev \
+    linux-headers \
+    lmdb-dev \
+    make \
+    openssl-dev \
+    pcre-dev \
+    yajl-dev \
+    zlib-dev
+
+# Clone and compile modsecurity. Binary will be located in /usr/local/modsecurity
+RUN echo "Installing ModSec Library" && \
+    git clone -b ${MODSEC_TAG} --depth 1 https://github.com/SpiderLabs/ModSecurity.git && \
+    git -C /opt/ModSecurity submodule update --init --recursive && \
+    (cd "/opt/ModSecurity" && \
+        ./build.sh && \
+        ./configure --with-lmdb && \
+        make && \
+        make install \
+    ) && \
+    rm -fr /opt/ModSecurity \
+        /usr/local/modsecurity/lib/libmodsecurity.a \
+        /usr/local/modsecurity/lib/libmodsecurity.la
+
+# Clone Modsec Nginx Connector, GeoIP, ModSec OWASP Rules, and download/extract nginx and GeoIP databases
+RUN echo 'Cloning Modsec Nginx Connector, GeoIP, ModSec OWASP Rules, and download/extract nginx and GeoIP databases' && \
+    git clone -b master --depth 1 https://github.com/SpiderLabs/ModSecurity-nginx.git && \
+    git clone -b master --depth 1 https://github.com/leev/ngx_http_geoip2_module.git && \
+    git clone -b ${OWASP_TAG} --depth 1 https://github.com/coreruleset/coreruleset.git /usr/local/owasp-modsecurity-crs && \
+		mv /usr/local/owasp-modsecurity-crs/crs-setup.conf.example /usr/local/owasp-modsecurity-crs/crs-setup.conf && \
+    wget -O - https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz | tar -xz && \
+    mkdir -p /etc/nginx/geoip && \
+    wget -O - https://download.db-ip.com/free/dbip-city-lite-${GEO_DB_RELEASE}.mmdb.gz | gzip -d > /etc/nginx/geoip/dbip-city-lite.mmdb && \
+    wget -O - https://download.db-ip.com/free/dbip-country-lite-${GEO_DB_RELEASE}.mmdb.gz | gzip -d > /etc/nginx/geoip/dbip-country-lite.mmdb
+
+# Install GeoIP2 and ModSecurity Nginx modules
+RUN echo 'Installing Nginx Modules' && \
+    (cd "/opt/nginx-$NGINX_VERSION" && \
+        ./configure --with-compat \
+            --add-dynamic-module=../ModSecurity-nginx \
+            --add-dynamic-module=../ngx_http_geoip2_module && \
+        make modules \
+    ) && \
+    cp /opt/nginx-$NGINX_VERSION/objs/ngx_http_modsecurity_module.so \
+        /opt/nginx-$NGINX_VERSION/objs/ngx_http_geoip2_module.so \
+        /usr/lib/nginx/modules/ && \
+    rm -fr /opt/* && \
+    apk del general-dependencies
+
+
 
 ############################################# Base image for Debian #############################################
 FROM nginx:1.21.6 AS debian
@@ -12,6 +88,9 @@ RUN apt-get update \
 	&& apt-get install --no-install-recommends --no-install-suggests -y libcap2-bin \
 	# temporary fix for CVE-2022-22822
 	&& apt-get install -y libexpat1 \
+	# temporary fix for CVE-2022-0778 and CVE-2021-4160
+	&& apt-get install -y apt-utils autoconf automake build-essential git libcurl4-openssl-dev libgeoip-dev liblmdb-dev libpcre++-dev libtool libxml2-dev libyajl-dev pkgconf wget zlib1g-dev \
+	&& apt-get install -y libssl1.1 openssl \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& echo $NGINX_VERSION > nginx_version
 
@@ -20,9 +99,27 @@ RUN apt-get update \
 # docker.io/library/nginx is a temporary workaround for Dependabot to see this as different from the one used in Debian
 FROM docker.io/library/nginx:1.21.6-alpine AS alpine
 
+#### COPY WAF MODULE
+COPY --from=basewaf-alpine /usr/local/modsecurity /usr/local/modsecurity
+COPY --from=basewaf-alpine /usr/local/owasp-modsecurity-crs /etc/nginx/owasp-modsecurity-crs/
+COPY --from=basewaf-alpine /usr/lib/nginx/modules/ /usr/lib/nginx/modules/
+
+COPY build/modsecurity /etc/nginx/modsec_conf
+
+####
+
+
 RUN apk add --no-cache libcap \
-	# temporary fix for CVE-2021-42374
-	&& apk upgrade --no-cache busybox
+	# Temp fix for CVE-2022-0778 and CVE-2022-23308
+	&& apk upgrade --no-cache libcrypto1.1 libssl1.1 libxml2 libxslt \
+ 		curl-dev \
+    libmaxminddb-dev \
+    libstdc++ \
+    libxml2-dev \
+    lmdb-dev \
+    pcre \
+    tzdata \
+    yajl
 
 
 ############################################# Base image for Alpine with NGINX Plus #############################################
@@ -33,9 +130,9 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/apk/cert.pem,mode=0644 \
 	--mount=type=secret,id=nginx-repo.key,dst=/etc/apk/cert.key,mode=0644 \
 	wget -nv -O /etc/apk/keys/nginx_signing.rsa.pub https://cs.nginx.com/static/keys/nginx_signing.rsa.pub \
 	&& printf "%s\n" "https://pkgs.nginx.com/plus/alpine/v$(grep -E -o '^[0-9]+\.[0-9]+' /etc/alpine-release)/main" >> /etc/apk/repositories \
-	# temporary fix for CVE-2021-42374
-	&& apk upgrade --no-cache busybox \
-	&& apk add --no-cache libcap nginx-plus~${NGINX_PLUS_VERSION#r} nginx-plus-module-njs~${NGINX_PLUS_VERSION#r}
+	&& apk add --no-cache libcap nginx-plus~${NGINX_PLUS_VERSION#r} nginx-plus-module-njs~${NGINX_PLUS_VERSION#r} \
+	# Temp fix for CVE-2022-0778
+	&& apk upgrade --no-cache libcrypto1.1 libssl1.1
 
 
 ############################################# Base image for Debian with NGINX Plus #############################################
@@ -49,6 +146,10 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode
 	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
 	apt-get update \
 	&& apt-get install --no-install-recommends --no-install-suggests -y ca-certificates gnupg curl apt-transport-https libcap2-bin \
+	# temporary fix for CVE-2022-22822
+	&& apt-get install -y libexpat1 \
+	# temporary fix for CVE-2022-0778 and CVE-2021-4160
+	&& apt-get install -y libssl1.1 openssl \
 	&& curl -fsSL https://cs.nginx.com/static/keys/nginx_signing.key | gpg --dearmor > /etc/apt/trusted.gpg.d/nginx_signing.gpg \
 	&& curl -fsSL -o /etc/apt/apt.conf.d/90pkgs-nginx https://cs.nginx.com/static/files/90pkgs-nginx \
 	&& DEBIAN_VERSION=$(awk -F '=' '/^VERSION_CODENAME=/ {print $2}' /etc/os-release) \
@@ -60,9 +161,10 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode
 	&& rm -rf /var/lib/apt/lists/*
 
 
-############################################# Base image for Debian with NGINX Plus and App Protect #############################################
+############################################# Base image for Debian with NGINX Plus and App Protect WAF/DoS #############################################
 FROM debian-plus as debian-plus-nap
 ARG NGINX_PLUS_VERSION
+ARG NAP_MODULES
 
 RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode=0644 \
 	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
@@ -70,69 +172,29 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode
 	&& apt-get install --no-install-recommends --no-install-suggests -y gnupg curl apt-transport-https \
 	&& curl -fsSL https://cs.nginx.com/static/keys/app-protect-security-updates.key | gpg --dearmor > /etc/apt/trusted.gpg.d/nginx_app_signing.gpg \
 	&& DEBIAN_VERSION=$(awk -F '=' '/^VERSION_CODENAME=/ {print $2}' /etc/os-release) \
-	&& printf "%s\n" "deb https://pkgs.nginx.com/app-protect/${NGINX_PLUS_VERSION^^}/debian ${DEBIAN_VERSION} nginx-plus" \
+	&& if [ -z "${NAP_MODULES##*waf*}" ]; then \
+	printf "%s\n" "deb https://pkgs.nginx.com/app-protect/${NGINX_PLUS_VERSION^^}/debian ${DEBIAN_VERSION} nginx-plus" \
 	"deb https://pkgs.nginx.com/app-protect-security-updates/debian ${DEBIAN_VERSION} nginx-plus" > /etc/apt/sources.list.d/nginx-app-protect.list \
 	&& apt-get update \
-	&& apt-get install --no-install-recommends --no-install-suggests -y \
-	nginx-plus-module-appprotect app-protect app-protect-attack-signatures app-protect-threat-campaigns \
-	&& apt-get purge --auto-remove -y apt-transport-https gnupg curl \
+	&& apt-get install --no-install-recommends --no-install-suggests -y app-protect app-protect-attack-signatures app-protect-threat-campaigns \
+	&& apt-get purge --auto-remove -y curl; \
+	fi \
+	&& if [ -z "${NAP_MODULES##*dos*}" ]; then \
+	printf "%s\n" "deb https://pkgs.nginx.com/app-protect-dos/${NGINX_PLUS_VERSION^^}/debian ${DEBIAN_VERSION} nginx-plus" > /etc/apt/sources.list.d/nginx-app-protect-dos.list \
+	&& apt-get update \
+	&& apt-get install --no-install-recommends --no-install-suggests -y app-protect-dos; \
+	fi \
+	&& apt-get purge --auto-remove -y apt-transport-https gnupg \
 	&& rm -rf /var/lib/apt/lists/* \
-	&& rm /etc/apt/sources.list.d/nginx-app-protect.list
+	&& rm /etc/apt/sources.list.d/nginx-app-protect*.list
 
 # Uncomment the lines below if you want to install a custom CA certificate
 # COPY build/*.crt  /usr/local/share/ca-certificates/
 # RUN update-ca-certificates
 
-############################################# Base image for Debian with NGINX Plus and App Protect Dos #############################################
-FROM debian-plus as debian-plus-dos
-ARG NGINX_PLUS_VERSION
-
-RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode=0644 \
-	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
-	set -x \
-	&& apt-get update \
-	&& apt-get -y install ca-certificates \
-	&& DEBIAN_VERSION=$(awk -F '=' '/^VERSION_CODENAME=/ {print $2}' /etc/os-release) \
-	&& printf "%s\n" "deb https://pkgs.nginx.com/app-protect-dos/${NGINX_PLUS_VERSION^^}/debian ${DEBIAN_VERSION} nginx-plus" > /etc/apt/sources.list.d/nginx-app-protect-dos.list \
-	&& apt-get update \
-	&& apt-get -y install app-protect-dos \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& rm /etc/apt/sources.list.d/nginx-app-protect-dos.list
-
-############################################# Base image for Debian with NGINX, App Protect and App Protect Dos #############################################
-FROM debian-plus-nap as debian-plus-nap-dos
-ARG NGINX_PLUS_VERSION
-
-RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode=0644 \
-	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
-	set -x \
-	&& apt-get update \
-	&& apt-get -y install ca-certificates \
-	&& DEBIAN_VERSION=$(awk -F '=' '/^VERSION_CODENAME=/ {print $2}' /etc/os-release) \
-	&& printf "%s\n" "deb https://pkgs.nginx.com/app-protect-dos/${NGINX_PLUS_VERSION^^}/debian ${DEBIAN_VERSION} nginx-plus" > /etc/apt/sources.list.d/nginx-app-protect-dos.list \
-	&& apt-get update \
-	&& apt-get -y install app-protect-dos \
-	&& rm -rf /var/lib/apt/lists/* \
-	&& rm /etc/apt/sources.list.d/nginx-app-protect-dos.list
-
-############################################# Base image for UBI 8 #############################################
-FROM redhat/ubi8-minimal AS ubi-base-8
-
-# temporary fix for CVE-2021-42574
-RUN microdnf upgrade -y libgcc libstdc++
-
-
-############################################# Base image for UBI 7 #############################################
-FROM registry.access.redhat.com/ubi7/ubi AS ubi-base-7
-
-RUN yum install -y microdnf
-
-# temporary fix for CVE-2021-42574
-RUN yum upgrade -y binutils
-
 
 ############################################# Base image for UBI #############################################
-FROM ubi-base-${UBI_VERSION} AS ubi-base
+FROM redhat/ubi8 AS ubi-base
 ARG IC_VERSION
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -146,7 +208,9 @@ LABEL name="NGINX Ingress Controller" \
 	io.k8s.description="The NGINX Ingress controller is an application that runs in a cluster and configures an HTTP load balancer according to Ingress resources." \
 	io.openshift.tags="nginx,ingress-controller,ingress,controller,kubernetes,openshift"
 
-RUN microdnf --nodocs install -y shadow-utils ca-certificates \
+RUN dnf --nodocs install -y shadow-utils ca-certificates \
+	# temporary fix for CVE-2022-24407
+	&& dnf --nodocs install -y cyrus-sasl-lib \
 	&& groupadd --system --gid 101 nginx \
 	&& useradd --system --gid nginx --no-create-home --home-dir /nonexistent --comment "nginx user" --shell /bin/false --uid 101 nginx
 
@@ -163,7 +227,7 @@ RUN --mount=type=bind,from=debian,source=/nginx_version,target=/tmp/nginx_versio
 	&& printf "%s\n" "[nginx]" "name=nginx repo" \
 	"baseurl=https://nginx.org/packages/mainline/centos/${version}/\$basearch/" \
 	"gpgcheck=1" "enabled=1" "module_hotfixes=true" > /etc/yum.repos.d/nginx.repo \
-	&& microdnf --nodocs install -y nginx-${NGINX_VERSION} \
+	&& dnf --nodocs install -y nginx-${NGINX_VERSION} \
 	&& rm /etc/yum.repos.d/nginx.repo
 
 
@@ -175,12 +239,13 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode
 	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
 	rpm --import https://cs.nginx.com/static/keys/nginx_signing.key \
 	&& curl -fsSL "https://cs.nginx.com/static/files/nginx-plus-$(grep -E -o '[0-9]+\.[0-9]+' /etc/redhat-release | cut -d"." -f1).repo" | tr 0 1 > /etc/yum.repos.d/nginx-plus.repo \
-	&& microdnf --nodocs install -y nginx-plus-${NGINX_PLUS_VERSION} nginx-plus-module-njs-${NGINX_PLUS_VERSION}
+	&& dnf --nodocs install -y nginx-plus-${NGINX_PLUS_VERSION} nginx-plus-module-njs-${NGINX_PLUS_VERSION}
 
 
-############################################# Base image for UBI with NGINX Plus and App Protect WAF #############################################
+############################################# Base image for UBI with NGINX Plus and App Protect WAF/DoS #############################################
 FROM ubi-plus as ubi-plus-nap
 ARG NGINX_PLUS_VERSION
+ARG NAP_MODULES
 
 RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode=0644 \
 	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
@@ -188,54 +253,23 @@ RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode
 	source /tmp/rhel_license \
 	&& subscription-manager register --org=${RHEL_ORGANIZATION} --activationkey=${RHEL_ACTIVATION_KEY} || true \
 	&& subscription-manager attach \
-	&& subscription-manager repos --enable rhel-7-server-optional-rpms --enable rhel-7-server-extras-rpms \
-	&& curl -fsSL https://cs.nginx.com/static/files/app-protect-7.repo > /etc/yum.repos.d/app-protect-7.repo \
-	&& yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm \
-	&& yum install -y app-protect-${NGINX_PLUS_VERSION#r}* app-protect-attack-signatures app-protect-threat-campaigns \
-	&& rm /etc/yum.repos.d/app-protect-7.repo \
+	&& dnf config-manager --set-enabled codeready-builder-for-rhel-8-x86_64-rpms \
+	&& dnf --nodocs install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm \
+	&& if [ -z "${NAP_MODULES##*waf*}" ]; then \
+	curl -fsSL https://cs.nginx.com/static/files/app-protect-8.repo > /etc/yum.repos.d/app-protect-8.repo; \
+	dnf --nodocs install -y app-protect-${NGINX_PLUS_VERSION#r}* app-protect-attack-signatures app-protect-threat-campaigns; \
+	fi \
+	&& if [ -z "${NAP_MODULES##*dos*}" ]; then \
+	curl -fsSL https://cs.nginx.com/static/files/app-protect-dos-8.repo > /etc/yum.repos.d/app-protect-dos-8.repo; \
+	dnf --nodocs install -y app-protect-dos-${NGINX_PLUS_VERSION#r}*; \
+	fi \
+	&& rm /etc/yum.repos.d/app-protect*.repo \
 	&& subscription-manager unregister \
-	&& yum clean all && rm -rf /var/cache/yum
+	&& dnf clean all && rm -rf /var/cache/dnf
 
 # Uncomment the lines below if you want to install a custom CA certificate
 # COPY build/*.crt  /etc/pki/ca-trust/source/anchors/
 # RUN update-ca-trust extract
-
-
-############################################# Base image for UBI with NGINX Plus and App Protect Dos #############################################
-FROM ubi-plus as ubi-plus-dos
-ARG NGINX_PLUS_VERSION
-
-RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode=0644 \
-	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
-	--mount=type=secret,id=rhel_license,dst=/tmp/rhel_license,mode=0644 \
-	source /tmp/rhel_license \
-	&& subscription-manager register --org=${RHEL_ORGANIZATION} --activationkey=${RHEL_ACTIVATION_KEY} || true \
-	&& subscription-manager attach \
-	&& subscription-manager repos --enable rhel-7-server-optional-rpms --enable rhel-7-server-extras-rpms \
-	&& curl -fsSL https://cs.nginx.com/static/files/app-protect-dos-7.repo > /etc/yum.repos.d/app-protect-dos-7.repo \
-	&& yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm \
-	&& yum install -y app-protect-dos-${NGINX_PLUS_VERSION#r}* \
-	&& rm /etc/yum.repos.d/app-protect-dos-7.repo \
-	&& subscription-manager unregister \
-	&& yum clean all && rm -rf /var/cache/yum
-
-
-############################################# Base image for UBI with NGINX Plus, App Protect WAF and App Protect Dos #############################################
-FROM ubi-plus-nap as ubi-plus-nap-dos
-ARG NGINX_PLUS_VERSION
-
-RUN --mount=type=secret,id=nginx-repo.crt,dst=/etc/ssl/nginx/nginx-repo.crt,mode=0644 \
-	--mount=type=secret,id=nginx-repo.key,dst=/etc/ssl/nginx/nginx-repo.key,mode=0644 \
-	--mount=type=secret,id=rhel_license,dst=/tmp/rhel_license,mode=0644 \
-	source /tmp/rhel_license \
-	&& subscription-manager register --org=${RHEL_ORGANIZATION} --activationkey=${RHEL_ACTIVATION_KEY} || true \
-	&& subscription-manager attach \
-	&& subscription-manager repos --enable rhel-7-server-optional-rpms --enable rhel-7-server-extras-rpms \
-	&& curl -fsSL https://cs.nginx.com/static/files/app-protect-dos-7.repo > /etc/yum.repos.d/app-protect-dos-7.repo \
-	&& yum install -y app-protect-dos-${NGINX_PLUS_VERSION#r}* \
-	&& rm /etc/yum.repos.d/app-protect-dos-7.repo \
-	&& subscription-manager unregister \
-	&& yum clean all && rm -rf /var/cache/yum
 
 
 ############################################# Base images containing libs for Opentracing #############################################
@@ -280,12 +314,13 @@ ARG IC_VERSION
 ARG GIT_COMMIT
 ARG DATE
 ARG TARGETPLATFORM
+ARG NAP_MODULES=none
 
 # copy oidc files on plus build
 RUN --mount=target=/tmp [ -n "${BUILD_OS##*plus*}" ] && exit 0; mkdir -p etc/nginx/oidc/ && cp -a /tmp/internal/configs/oidc/* /etc/nginx/oidc/
 
-# run only on nap build
-RUN --mount=target=/tmp [ -n "${BUILD_OS##*nap*}" ] && exit 0; mkdir -p /etc/nginx/waf/nac-policies /etc/nginx/waf/nac-logconfs /etc/nginx/waf/nac-usersigs /var/log/app_protect /opt/app_protect \
+# run only on nap waf build
+RUN --mount=target=/tmp [ -n "${NAP_MODULES##*waf*}" ] && exit 0; mkdir -p /etc/nginx/waf/nac-policies /etc/nginx/waf/nac-logconfs /etc/nginx/waf/nac-usersigs /var/log/app_protect /opt/app_protect \
 	&& chown -R nginx:0 /etc/app_protect /usr/share/ts /var/log/app_protect/ /opt/app_protect/ /var/log/nginx/ \
 	&& touch /etc/nginx/waf/nac-usersigs/index.conf \
 	&& printf "%s\n" "MODULE = ALL;" "LOG_LEVEL = TS_CRIT;" "FILE = 2;" > /etc/app_protect/bd/logger.cfg \
@@ -300,8 +335,20 @@ RUN --mount=target=/tmp [ -n "${BUILD_OS##*nap*}" ] && exit 0; mkdir -p /etc/ngi
 	; done \
 	&& cp -a /tmp/build/log-default.json /etc/nginx
 
-# run only on dos build
-RUN --mount=target=/tmp [ -n "${BUILD_OS##*dos*}" ] && exit 0; mkdir -p /root/app_protect_dos /etc/nginx/dos/policies /etc/nginx/dos/logconfs /shared/cores /var/log/adm /var/run/adm && chmod 777 /shared/cores /var/log/adm /var/run/adm /etc/app_protect_dos
+### TODO Run only 
+RUN apk add --no-cache \
+    curl-dev \
+    libmaxminddb-dev \
+    libstdc++ \
+    libxml2-dev \
+    lmdb-dev \
+    pcre \
+    tzdata \
+    yajl
+
+# run only on nap dos build
+RUN --mount=target=/tmp [ -n "${NAP_MODULES##*dos*}" ] && exit 0; mkdir -p /root/app_protect_dos /etc/nginx/dos/policies /etc/nginx/dos/logconfs /shared/cores /var/log/adm /var/run/adm \
+	&& chmod 777 /shared/cores /var/log/adm /var/run/adm /etc/app_protect_dos
 
 RUN --mount=target=/tmp mkdir -p /var/lib/nginx /etc/nginx/secrets /etc/nginx/stream-conf.d \
 	&& setcap 'cap_net_bind_service=+ep' /usr/sbin/nginx 'cap_net_bind_service=+ep' /usr/sbin/nginx-debug \
@@ -310,6 +357,8 @@ RUN --mount=target=/tmp mkdir -p /var/lib/nginx /etc/nginx/secrets /etc/nginx/st
 	/tmp/internal/configs/version2/nginx$PLUS.virtualserver.tmpl /tmp/internal/configs/version2/nginx$PLUS.transportserver.tmpl / \
 	&& chown -R nginx:0 /etc/nginx /etc/nginx/secrets /var/cache/nginx /var/lib/nginx /*.tmpl \
 	&& rm -f /etc/nginx/conf.d/* /etc/apt/apt.conf.d/90pkgs-nginx /etc/apt/sources.list.d/nginx-plus.list
+
+
 
 # Uncomment the line below if you would like to add the default.pem to the image
 # and use it as a certificate and key for the default server
@@ -386,3 +435,7 @@ FROM common as download
 LABEL org.nginx.kic.image.build.version="binaries"
 
 COPY --from=kic /nginx-ingress /
+
+# make alpine-image PREFIX=minikawoon/nginxwaf-ingress TARGET=download
+
+# make push PREFIX=minikawoon/nginxwaf-ingress TAG=<YOUR_TAG_VERSION>
