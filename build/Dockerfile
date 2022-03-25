@@ -4,6 +4,15 @@ ARG NGINX_PLUS_VERSION=r25
 ARG UBI_VERSION=8
 ARG FILES=
 
+############################################# Base NAXSI for ALPINE #############################################
+FROM docker.io/library/nginx:1.21.3-alpine AS basewaf-alpine
+COPY build/naxsi/build.sh /build.sh
+
+RUN apk update \
+	&& apk upgrade \
+	&& apk add -U bash \
+	&& /build.sh
+
 ############################################# Base image for Debian #############################################
 FROM nginx:1.21.3 AS debian
 
@@ -18,6 +27,11 @@ RUN apt-get update \
 ############################################# Base image for Alpine #############################################
 # docker.io/library/nginx is a temporary workaround for Dependabot to see this as different from the one used in Debian
 FROM docker.io/library/nginx:1.21.3-alpine AS alpine
+
+#### COPY WAF MODULE
+COPY --from=basewaf-alpine /etc/nginx/modules/ngx_http_naxsi_module.so /etc/nginx/modules/ngx_http_naxsi_module.so
+COPY --from=basewaf-alpine /etc/nginx/naxsi_conf /etc/nginx/naxsi_conf
+####
 
 RUN apk add --no-cache libcap \
 	# temporary fix for CVE-2021-22945
@@ -220,6 +234,17 @@ RUN mkdir -p /var/lib/nginx /etc/nginx/secrets /etc/nginx/stream-conf.d \
 	&& setcap -v 'cap_net_bind_service=+ep' /usr/sbin/nginx 'cap_net_bind_service=+ep' /usr/sbin/nginx-debug \
 	&& chown -R nginx:0 /etc/nginx /etc/nginx/secrets /var/cache/nginx /var/lib/nginx \
 	&& rm -f /etc/nginx/conf.d/* /etc/apt/apt.conf.d/90pkgs-nginx /etc/apt/sources.list.d/nginx-plus.list
+
+## TODO HERE
+RUN apk add --no-cache \
+    curl-dev \
+    libmaxminddb-dev \
+    libstdc++ \
+    libxml2-dev \
+    lmdb-dev \
+    pcre \
+    tzdata \
+    yajl
 
 COPY --chown=nginx:0 internal/configs/version1/nginx$PLUS.ingress.tmpl \
 	internal/configs/version1/nginx$PLUS.tmpl \

@@ -3,12 +3,12 @@ GIT_COMMIT = $(shell git rev-parse HEAD || echo unknown)
 GIT_COMMIT_SHORT = $(shell echo ${GIT_COMMIT} | cut -c1-7)
 GIT_TAG = $(shell git describe --tags --abbrev=0 || echo untagged)
 DATE = $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-VERSION = $(GIT_TAG)-SNAPSHOT-$(GIT_COMMIT_SHORT)
+VERSION = $(GIT_TAG)
 TAG = $(VERSION:v%=%)
 TARGET ?= local
 
 override DOCKER_BUILD_OPTIONS += --build-arg IC_VERSION=$(VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT) --build-arg DATE=$(DATE)
-DOCKER_CMD = docker build $(DOCKER_BUILD_OPTIONS) --target $(TARGET) -f build/Dockerfile -t $(PREFIX):$(TAG) .
+DOCKER_CMD = docker build --platform linux/amd64 $(DOCKER_BUILD_OPTIONS) --target $(TARGET) -f build/Dockerfile -t $(PREFIX):$(TAG) .
 PLUS_ARGS = --build-arg PLUS=-plus --build-arg FILES=plus-common --secret id=nginx-repo.crt,src=nginx-repo.crt --secret id=nginx-repo.key,src=nginx-repo.key
 NAP_ARGS = --build-arg FILES=nap-common
 
