@@ -19,7 +19,7 @@ set -o nounset
 set -o pipefail
 
 export NGINX_VERSION=1.21.3
-export IF_REQUEST_BODY_VERSION=v1.0.0-alpha
+export IF_REQUEST_BODY_VERSION=v2.0.5-alpha
 
 export BUILD_PATH=/tmp/build
 
@@ -55,7 +55,8 @@ get_src()
 
 get_src "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz" "nginx-$NGINX_VERSION.tar.gz"
 
-git clone https://github.com/Taymindis/nginx-if-request-body.git nginx-if-request-body
+# Please update version make sure it's really take refresh when building image
+git clone https://github.com/Taymindis/nginx-if-request-body.git nginx-if-request-body-$IF_REQUEST_BODY_VERSION
 
 
 # improve compilation times
@@ -76,7 +77,7 @@ cd "$BUILD_PATH/nginx-$NGINX_VERSION"
 ./configure \
   --prefix=/usr/local/nginx \
   --with-compat \
-  --add-dynamic-module=$BUILD_PATH/nginx-if-request-body
+  --add-dynamic-module=$BUILD_PATH/nginx-if-request-body-$IF_REQUEST_BODY_VERSION
 
 make modules
 mkdir -p /etc/nginx/modules
