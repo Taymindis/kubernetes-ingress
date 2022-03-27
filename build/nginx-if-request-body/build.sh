@@ -19,7 +19,7 @@ set -o nounset
 set -o pipefail
 
 export NGINX_VERSION=1.21.3
-export IF_REQUEST_BODY_VERSION=v2.0.5-alpha
+export IF_REQUEST_BODY_VERSION=v2.0.6-alpha
 
 export BUILD_PATH=/tmp/build
 
@@ -52,11 +52,24 @@ get_src()
   rm -rf "$f"
 }
 
+get_if_req_body_src()
+{
+  url="$1"
+  f="$2"
+
+  echo "Downloading $url"
+
+  curl -sSL "$url" -o "$f"
+  tar xzf "$f"
+  rm -rf "$f"
+  mv nginx-if-request-body* nginx-if-request-body
+}
+
 
 get_src "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz" "nginx-$NGINX_VERSION.tar.gz"
 
 # Please update version make sure it's really take refresh when building image
-git clone https://github.com/Taymindis/nginx-if-request-body.git nginx-if-request-body-$IF_REQUEST_BODY_VERSION
+get_if_req_body_src "https://github.com/Taymindis/nginx-if-request-body/archive/refs/tags/$IF_REQUEST_BODY_VERSION.tar.gz" "nginx-$NGINX_VERSION.tar.gz"
 
 
 # improve compilation times
@@ -77,7 +90,7 @@ cd "$BUILD_PATH/nginx-$NGINX_VERSION"
 ./configure \
   --prefix=/usr/local/nginx \
   --with-compat \
-  --add-dynamic-module=$BUILD_PATH/nginx-if-request-body-$IF_REQUEST_BODY_VERSION
+  --add-dynamic-module=$BUILD_PATH/nginx-if-request-body
 
 make modules
 mkdir -p /etc/nginx/modules
