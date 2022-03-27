@@ -19,6 +19,7 @@ set -o nounset
 set -o pipefail
 
 export NGINX_VERSION=1.21.3
+export IF_REQUEST_BODY_VERSION=v1.0.0-alpha
 
 export BUILD_PATH=/tmp/build
 
@@ -54,7 +55,7 @@ get_src()
 
 get_src "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz" "nginx-$NGINX_VERSION.tar.gz"
 
-get_src "https://github.com/Taymindis/naxsi/archive/refs/tags/1.3.1-Remove-Assertion.tar.gz" "naxsi-1.3.1-Remove-Assertion.tar.gz"
+git clone https://github.com/Taymindis/nginx-if-request-body.git nginx-if-request-body
 
 
 # improve compilation times
@@ -75,14 +76,12 @@ cd "$BUILD_PATH/nginx-$NGINX_VERSION"
 ./configure \
   --prefix=/usr/local/nginx \
   --with-compat \
-  --add-dynamic-module=$BUILD_PATH/naxsi-1.3.1-Remove-Assertion/naxsi_src
+  --add-dynamic-module=$BUILD_PATH/nginx-if-request-body
 
 make modules
 mkdir -p /etc/nginx/modules
-mkdir -p /etc/nginx/naxsi_conf
 
-cp objs/ngx_http_naxsi_module.so /etc/nginx/modules/ngx_http_naxsi_module.so
-cp $BUILD_PATH/naxsi-1.3.1-Remove-Assertion/naxsi_config/naxsi_core.rules /etc/nginx/naxsi_conf/
+cp objs/ngx_http_if_request_body_module.so /etc/nginx/modules/ngx_http_if_request_body_module.so
 
 # remove .a files
 rm -rf objs
