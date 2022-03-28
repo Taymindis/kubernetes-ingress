@@ -22,6 +22,15 @@ RUN apk update \
 	&& apk add -U bash \
 	&& /build.sh
 
+############################################# VTS for ALPINE #############################################
+FROM docker.io/library/nginx:1.21.3-alpine AS vts-alpine
+COPY build/vts/build.sh /build.sh
+
+RUN apk update \
+	&& apk upgrade \
+	&& apk add -U bash \
+	&& /build.sh
+
 ############################################# Base image for Debian #############################################
 FROM nginx:1.21.3 AS debian
 
@@ -41,6 +50,7 @@ FROM docker.io/library/nginx:1.21.3-alpine AS alpine
 COPY --from=basewaf-alpine /etc/nginx/modules/ngx_http_naxsi_module.so /etc/nginx/modules/ngx_http_naxsi_module.so
 COPY --from=basewaf-alpine /etc/nginx/naxsi_conf /etc/nginx/naxsi_conf
 COPY --from=if-request-body-alpine /etc/nginx/modules/ngx_http_if_request_body_module.so /etc/nginx/modules/ngx_http_if_request_body_module.so
+COPY --from=vts-alpine /etc/nginx/modules/ngx_http_vhost_traffic_status_module.so /etc/nginx/modules/ngx_http_vhost_traffic_status_module.so
 ####
 
 RUN apk add --no-cache libcap \
